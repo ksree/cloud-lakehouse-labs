@@ -172,8 +172,240 @@ spark.sql("use database "+databaseName)
 # DBTITLE 1,Give access to your schema to other users / or groups
 # MAGIC %sql
 # MAGIC -- FILL IN <SCHEMA> and <TABLE>
-# MAGIC GRANT USE SCHEMA ON SCHEMA <SCHEMA> TO `account users`;
-# MAGIC ##GRANT SELECT ON TABLE <SCHEMA>.<TABLE> TO `account users`;
+# MAGIC GRANT USE SCHEMA ON SCHEMA  <SCHEMA> TO `account users`;
+# MAGIC --GRANT SELECT ON TABLE <SCHEMA>.<TABLE> TO `account users`;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## The table was created without restriction, all users can access all the ![rows](path)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM churn_users
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Confirming that we can see all countries (FR, USA, SPAIN) prior to setting up row-filters:
+# MAGIC SELECT DISTINCT(country) FROM churn_users;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2.0 Implementing row-level security on our table
+# MAGIC
+# MAGIC  row-level security allows you to automatically hide rows in your table from users, based on their identity or group assignment.
+# MAGIC
+# MAGIC Lets see how you can enforce a policy where an analyst can only access data related to customers in their country.
+# MAGIC
+# MAGIC To capture the current user and check their membership to a particular group, Databricks provides you with 2 built-in functions:
+# MAGIC
+# MAGIC - current_user()
+# MAGIC - and is_account_group_member()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC
+# MAGIC -- get the current user (for informational purposes)
+# MAGIC SELECT current_user(), is_account_group_member('account users');
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2.1. Define the access rule
+# MAGIC  To declare an access control rule, you will need to create a SQL function that returns a boolean. Unity Catalog will then hide the row if the function returns False.
+# MAGIC
+# MAGIC Inside your SQL function, you can define different conditions and implement complex logic to create this boolean return value. (e.g : IF(condition)-THEN(view)-ELSE)
+# MAGIC
+# MAGIC Here, we will apply the following logic :
+# MAGIC
+# MAGIC if the user is a bu_admin group member, then they can access data from all countries. (we will use is_account_group_member('group_name') we saw earlier)
+# MAGIC if the user is not a bu_admin group member, we'll restrict access to only the rows pertaining to regions US as our default regions. All other customers will be hidden!
+# MAGIC Note that columns within whatever table that this function will be applied on, can also be referred to inside the function's conditions. You can do so by using parameters.
+
+# COMMAND ----------
+
+# DBTITLE 1,Create a SQL function for a simple row-filter:
+# MAGIC %sql
+# MAGIC CREATE OR REPLACE FUNCTION region_filter(region_param STRING) 
+# MAGIC RETURN 
+# MAGIC   is_account_group_member('bu_admin') or  -- bu_admin can access all regions
+# MAGIC   region_param like "US%";                -- non bu_admin's can only access regions containing US
+# MAGIC
+# MAGIC -- Grant access to all users to the function for the demo by making all account users owners.  Note: Don't do this in production!
+# MAGIC GRANT ALL PRIVILEGES ON FUNCTION region_filter TO `account users`; 
+# MAGIC
+# MAGIC -- Let's try our filter. As expected, we can access USA but not SPAIN.
+# MAGIC SELECT region_filter('USA'), region_filter('SPAIN')
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2.2. Apply the access rule
+# MAGIC
+# MAGIC With our rule function declared, all that's left to do is apply it on a table and see it in action! A simple SET ROW FILTER followed by a call to the function is all it takes.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Apply access rule to customers table.
+# MAGIC -- country will be the column sent as parameter to our SQL function (region_param)
+# MAGIC ALTER TABLE churn_users SET ROW FILTER region_filter ON (country);
+
+# COMMAND ----------
+
+# DBTITLE 1,Confirm only customers in USA are visible:
+# MAGIC %sql
+# MAGIC SELECT * FROM churn_users
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- We should see only USA and Canada here, unless the user is a member of bu_admin:
+# MAGIC SELECT DISTINCT(country) FROM churn_users;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### This is working as expected!
+# MAGIC
+# MAGIC
+# MAGIC We secured our table, and dynamically filter the results to only keep rows with country=USA.
+# MAGIC
+# MAGIC Let's drop the current filter, and demonstrate a more dynamic version.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC ALTER TABLE churn_users DROP ROW FILTER;
+# MAGIC -- Confirming that we can once again see all countries:
+# MAGIC SELECT DISTINCT(country) FROM churn_users;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2.3 More advanced dynamic filters.
+# MAGIC Let's imagine we have a few regional user groups defined as : ANALYST_USA, ANALYST_SPAIN, etc... and we want to use these groups to dynamically filter on a country value.
+# MAGIC
+# MAGIC This can easily be done by checking the group based on the region value.
+
+# COMMAND ----------
+
+# DBTITLE 1,test cell
+# MAGIC %sql
+# MAGIC -- If this request is failing, you're missing some groups. Make sure you are part of ANALYST_USA and not bu_admin!
+# MAGIC SELECT 
+# MAGIC   assert_true(is_account_group_member('account users'),      'You must be part of account users for this demo'),
+# MAGIC   assert_true(is_account_group_member('ANALYST_USA'),        'You must be part of ANALYST_USA for this demo'),
+# MAGIC   assert_true(not is_account_group_member('ANALYST_FR'),       'You must NOT be part of bu_admin for this demo');
+# MAGIC
+# MAGIC -- Cleanup any row-filters or masks that may have been added in previous runs of the demo
+# MAGIC ALTER TABLE churn_users DROP ROW FILTER;
+# MAGIC ALTER TABLE churn_users ALTER COLUMN address DROP MASK;
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC CREATE OR REPLACE FUNCTION region_filter_dynamic(country_param STRING) 
+# MAGIC RETURN 
+# MAGIC   is_account_group_member('bu_admin') or                           -- bu_admin can access all regions
+# MAGIC   is_account_group_member(CONCAT('ANALYST_', country_param)); --regional admins can access only if the region (country column) matches the regional admin group suffix.
+# MAGIC   
+# MAGIC GRANT ALL PRIVILEGES ON FUNCTION region_filter_dynamic TO `account users`; --only for demo, don't do that in prod as everybody could change the function
+# MAGIC
+# MAGIC -- apply the new access rule to the customers table:
+# MAGIC ALTER TABLE churn_users SET ROW FILTER region_filter_dynamic ON (country);
+# MAGIC
+# MAGIC SELECT region_filter_dynamic('USA'), region_filter_dynamic('SPAIN')
+
+# COMMAND ----------
+
+# DBTITLE 1,Check the rule. We can only access USA
+# MAGIC %sql
+# MAGIC -- Since our current user is a member of ANALYST_USA, now they see only USA from our query:
+# MAGIC SELECT DISTINCT(country) FROM churn_users;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Column-level access control
+# MAGIC ## 
+# MAGIC
+# MAGIC Declaring a rule to implement column-level access control is very similar to what we did earlier for our row-level access control rule.
+# MAGIC
+# MAGIC In this example, we'll create a SQL function with the following IF-THEN-ELSE logic:
+# MAGIC
+# MAGIC if the current user is member of the group bu_admin, then return the column value as-is (here ssn),
+# MAGIC if not, mask it completely with a constant string (here ****)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- create a SQL function for a simple column mask:
+# MAGIC CREATE OR REPLACE FUNCTION simple_mask(column_value STRING)
+# MAGIC RETURN 
+# MAGIC   IF(is_account_group_member('bu_admin'), column_value, "****");
+# MAGIC    
+# MAGIC GRANT ALL PRIVILEGES ON FUNCTION simple_mask TO `account users`; --only for demo, don't do that in prod as everybody could change the function
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3.2. Apply the access rule
+# MAGIC ## 
+# MAGIC To change things a bit, instead of applying a rule on an existing table, we'll demonstrte here how we can apply a rule upon the creation of a new table.
+# MAGIC
+# MAGIC Note: In this demo we have only one column mask function to apply. In real life, you may want to apply different column masks on different columns within the same table.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- applying our simple masking function to the 'address' column in the 'customers' table:
+# MAGIC ALTER TABLE
+# MAGIC   churn_users
+# MAGIC ALTER COLUMN
+# MAGIC   address
+# MAGIC SET
+# MAGIC   MASK simple_mask;
+
+# COMMAND ----------
+
+# DBTITLE 1,🥷 Confirm Addresses have been masked
+# MAGIC %sql
+# MAGIC SELECT * 
+# MAGIC FROM churn_users;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Change the definition of the access control rules
+# MAGIC If the business ever decides to change a rule's conditions or the way they want the data to be returned in response to these conditions, it is easy to adapt with Unity Catalog.
+# MAGIC
+# MAGIC Since the function is the central element, all you need to do is update it and the effects will automatically be reflected on all the tables that it has been attached to.
+# MAGIC
+# MAGIC In this example, we'll rewrite our simple_mask column mask function and change the way we anonymse data from the rather simplistic ****, to using the built-in sql MASK function (see documentation)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Updating the existing simple_mask function to provide more advanced masking options via the built-in SQL MASK function:
+# MAGIC CREATE OR REPLACE FUNCTION simple_mask(maskable_param STRING)
+# MAGIC    RETURN 
+# MAGIC       IF(is_account_group_member('bu_admin'), maskable_param, MASK(maskable_param, '*', '*'));
+# MAGIC       -- You can also create custom mask transformations, such as concat(substr(maskable_param, 0, 2), "..."))
+# MAGIC    
+# MAGIC  -- grant access to all user to the function for the demo  
+# MAGIC ALTER FUNCTION simple_mask OWNER TO `account users`;
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * 
+# MAGIC FROM churn_users;
 
 # COMMAND ----------
 
