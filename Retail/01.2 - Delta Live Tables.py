@@ -128,6 +128,17 @@ print("Specify the following storage location for the DLT pipeline tables:\n" + 
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## One more config in the UI:
+# MAGIC ## 
+# MAGIC In the DLT UI, Under Advanced, provide a key value pair
+# MAGIC
+# MAGIC Key: Source 
+# MAGIC
+# MAGIC Value: path to the source files
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Run the following after having set up and run the DLT job
 
 # COMMAND ----------
